@@ -1,0 +1,12 @@
+[project]
+name = "aicr"
+version = "0.1.0"
+description = "Local-first AI Coding Recorder"
+requires-python = ">=3.12"
+dependencies = ["typer>=0.12"]
+
+[project.scripts]
+aicr = "aicr.cli:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
