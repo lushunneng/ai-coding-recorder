@@ -166,3 +166,65 @@ Linux/macOS 使用 `setsid` 创建独立 session，并在子进程组内转发�
 ### Provider 验证清单
 
 启用 native 前必须提交：Provider 名称和版本范围、历史格式样本来源、脱敏 Fixture 路径、解析事件类型清单、字段映射、未知字段保留策略、损坏文件行为、重复导入测试、版本不匹配行为和端到端 export 测试。验证结果写入 `providers/<name>/VERIFICATION.md`，未满足全部项目保持 unsupported。
+
+## 第二轮架构修订（正式条款）
+
+### 事件分层与热路径
+
+`raw.jsonl` 使用精简 Raw Event，仅包含 `id`、`session_id`、`sequence`、`timestamp`、`monotonic_ns`、`type`、`payload` 七类字段；`events.jsonl` 保存派生的 Semantic Event，才扩展 actor、provider、capture_mode、stream、confidence、provider_data 等字段。PTY 记录进程只追加 raw.jsonl，不写 SQLite、不执行全文索引；events 和 SQLite 在 session_end 后同步生成或由后台任务生成，避免索引阻塞终端热路径。
+
+### 锁接管协议
+
+stale lock 接管采用 CAS：写入包含唯一 takeover_id 的临时 lock，使用原子 rename 覆盖旧 lock，随后读回校验 takeover_id；若不是自己的 takeover_id，当前进程让步并重试。lock JSON 包含 pid、process_start_time、session_id、created_at、heartbeat_at、host_id。只有 PID 不存在且心跳超过 30 秒才允许发起接管，不能仅凭文件年龄判断。
+
+### Asset 分片协议
+
+超过 256 KiB 的内容写入 Asset；超过单 Asset 64 MiB 时分片。每个分片事件必须包含 `content_ref`、`chunk_of`、`chunk_index`（从 0 开始）、`chunk_total`、字节数和 SHA-256。导出层按 `chunk_of` 聚合，按 `chunk_index` 排序并校验总数、大小和哈希后拼接；缺片时保留 warning 占位，不静默生成不完整内容。
+
+### 恢复扫描
+
+`recover` 默认只验证尾部并在 metadata 写入最后有效 sequence，不修改 raw.jsonl。`recover --scan` 扫描整个文件，跳过所有不可解析行，将其 sequence（若可识别）写入 `recovery.skipped_sequences`，并在派生 events 和导出时间线对应位置插入 warning 占位。原始文件始终只追加，任何恢复结果都可追溯。
+
+### 容量与保留策略
+
+总目录达到 20 GiB 时默认拒绝新录制；正在运行的 Session 继续写生命周期和 error，并标记 degraded。禁止自动删除历史数据。配置 TOML 中保留策略独立定义：`retention_days = null`、`max_sessions = null`，分别按时间和数量控制；触发时 doctor 给出摘要，`aicr prune --dry-run` 列出待删 Session，实际清理必须显式 `aicr prune --yes`。
+
+### SQLite 并发
+
+SQLite 启用 WAL、外键和 busy timeout。JSONL 记录进程完全不触碰 SQLite；session_end 后再写索引，失败可重试。`rebuild-index` 按 Session 读锁处理，跳过正在写入的 Session，完成后可重复执行。
+
+### 导出 CSP 与脱敏版本
+
+单文件 HTML 默认使用 `script-src 'none'`；需要交互脚本时只允许构建阶段计算出的 `script-src 'sha256-<hash>'`，禁止使用 `script-src 'self'` 放宽策略。内置样式可使用 `style-src 'unsafe-inline'`，图片使用 `img-src data:` 或 Bundle 相对路径。
+
+脱敏规则有独立的 `redaction_rules_version`，与 schema_version 分开递增。每条规则至少包含一个 match fixture 和一个 non-match fixture；规则变更必须通过全量回归。`redaction_debug` 仅记录规则名和 offset，不记录原文；环境变量形式如 `export AWS_SECRET=...` 纳入覆盖范围。JWT 默认只整体识别三段式字符串；`--deep-redact` 才在内存中解码 payload 并扫描，解码结果不落盘。
+
+### CLI 和默认文件名
+
+CLI 合同补充：
+
+```text
+aicr init [--force]
+aicr show <ID|latest> [--format summary|transcript|json] [--from SEQ] [--to SEQ] [--since ISO|30m] [--until ISO|30m]
+aicr delete <ID|latest> [--include-assets] [--yes]
+aicr prune [--dry-run] [--yes]
+aicr sessions [--cursor TOKEN] [--limit N]
+```
+
+`--from` 和 `--to` 只接受 sequence 整数；时间筛选使用 `--since` 和 `--until`。`show` 默认输出终端友好的摘要和事件时间线，transcript 输出分页友好的纯文本，json 输出机器可读结构。`init` 负责创建/修复目录、默认 config.toml 和权限；`doctor` 只检查，不修改。
+
+未指定 `--out` 时默认文件名为 `{session_id[:8]}_{started_at:%Y%m%dT%H%M%S}.{ext}`，Bundle 使用 `.zip`；目标存在时拒绝，除非 `--force`。
+
+### Phase 0 交付物
+
+Phase 0 必须提交以下文件后才算完成：
+
+- `docs/schema.md`：所有 Raw/Semantic 事件、字段类型、版本规则和分片协议。
+- `docs/capability_matrix.md`：各 capture_mode 支持的字段及 confidence 上限。
+- `docs/exit_codes.md`：Agent、Recorder、配置、恢复和导出错误码。
+
+Phase 2 的正式定义为：`sessions/show`、JSON/Markdown/HTML/Bundle、脱敏、原子导出和最小 `import --transcript`；这是将原 Phase 4 的基础导入前移，以保证直接启动会话也有可用保存路径。Native Adapter 仍在 Phase 5。
+
+### Shell 启动行为
+
+PTY 子进程继承 shell 的启动序列，`.bashrc`、`.profile` 等初始化输出会进入 raw.jsonl；需要干净环境时使用 `aicr record -- bash --norc --noprofile`。脱敏规则覆盖常见 `export NAME=secret` 形式，但不能替代用户避免在终端输入秘密。
