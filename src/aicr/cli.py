@@ -1,5 +1,5 @@
 from pathlib import Path
-import os, typer, shutil
+import os, typer, shutil, json, hashlib, zipfile, time
 from .recorder import record
 from .storage import recover_file
 from .exporter import find_session, render, atomic_write
@@ -32,6 +32,18 @@ def export(identifier:str='latest',format:str='html',out:Path|None=None,bundle:b
   os.replace(tmp,target)
  else: atomic_write(target,render(m,format))
  typer.echo(str(target))
+
+@app.command("import")
+def import_transcript(provider: str = typer.Option(...), file: Path = typer.Option(...), transcript: Path | None = typer.Option(None)):
+    source = transcript or file
+    if not source.exists(): raise typer.BadParameter("input file not found")
+    data = source.read_bytes(); digest = hashlib.sha256(data).hexdigest()
+    paths = __import__("aicr.storage", fromlist=["make_session"]).make_session(home())
+    meta = {"id": paths.root.name, "status": "completed", "provider": provider, "capture_mode": "import", "source": str(source), "source_sha256": digest, "started_at": time.time(), "ended_at": time.time()}
+    paths.raw.write_text(json.dumps({"id":"evt_000000000001","session_id":paths.root.name,"sequence":1,"timestamp":time.time(),"monotonic_ns":time.monotonic_ns(),"type":"terminal_output","payload":{"encoding":"utf-8","text":data.decode("utf-8", errors="replace")}}, ensure_ascii=False)+"\n")
+    paths.raw.write_text(paths.raw.read_text()+json.dumps({"id":"evt_000000000002","session_id":paths.root.name,"sequence":2,"timestamp":time.time(),"monotonic_ns":time.monotonic_ns(),"type":"session_end","payload":{"status":"completed"}})+"\n")
+    __import__("aicr.storage", fromlist=["atomic_json"]).atomic_json(paths.metadata, meta); typer.echo(paths.root.name)
+
 @app.command()
 def init(force:bool=False): home(); typer.echo(str(home()))
 if __name__=='__main__': app()
