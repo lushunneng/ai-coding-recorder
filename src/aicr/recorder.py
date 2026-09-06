@@ -39,9 +39,14 @@ def record(command: list[str], home: Path) -> int:
 
     for s in old:
         signal.signal(s, forward)
+    poller = select.poll()
+    poller.register(master, select.POLLIN)
+    if os.isatty(0):
+        poller.register(0, select.POLLIN)
     try:
         while True:
-            r, _, _ = select.select([master, 0], [], [], 0.2)
+            ready = poller.poll(200)
+            r = [fd for fd, _ in ready]
             if 0 in r:
                 b = os.read(0, 4096)
                 if not b:
@@ -92,5 +97,8 @@ def record(command: list[str], home: Path) -> int:
         raise
     finally:
         writer.close()
-        os.close(master)
+        try:
+            os.close(master)
+        except OSError:
+            pass
         lock.release()

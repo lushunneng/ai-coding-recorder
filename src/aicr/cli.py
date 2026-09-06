@@ -35,7 +35,7 @@ def recover(scan: bool = False):
 
 
 @app.command()
-def show(identifier: str = "latest", format: str = "summary"):
+def show(identifier: str = typer.Argument("latest"), format: str = "summary"):
     m = find_session(home(), identifier)
     if not m:
         raise typer.BadParameter("session not found")
@@ -47,7 +47,7 @@ def show(identifier: str = "latest", format: str = "summary"):
 
 @app.command()
 def export(
-    identifier: str = "latest",
+    identifier: str = typer.Argument("latest"),
     format: str = "html",
     out: Path | None = None,
     bundle: bool = False,
