@@ -157,3 +157,23 @@ def rebuild_index():
     from .database import rebuild
 
     typer.echo(f"indexed events: {rebuild(home())}")
+
+
+@app.command()
+def delete(identifier: str, include_assets: bool = False, yes: bool = False):
+    import shutil
+
+    from .exporter import find_session
+
+    if not yes:
+        raise typer.BadParameter("pass --yes to confirm deletion")
+    m = find_session(home(), identifier)
+    if not m:
+        raise typer.BadParameter("session not found")
+    shutil.rmtree(m.parent)
+    typer.echo(f"deleted {m.parent.name}")
+
+
+@app.command()
+def prune(dry_run: bool = True, yes: bool = False):
+    typer.echo("no automatic retention policy configured; nothing removed")
