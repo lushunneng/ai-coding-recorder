@@ -22,7 +22,7 @@ def show(identifier:str='latest',format:str='summary'):
 def export(identifier:str='latest',format:str='html',out:Path|None=None,bundle:bool=False,force:bool=False,include_raw:bool=False):
  m=find_session(home(),identifier)
  if not m: raise typer.BadParameter('session not found')
- ext='zip' if bundle else format; target=out or home()/'exports'/f'{m.parent.name[:8]}_{m.stat().st_mtime_ns}.{ext}'
+ ext='zip' if bundle else format; target=out or home()/'exports'/f'{m.parent.name[:8]}_{int(m.stat().st_mtime)}.{ext}'
  if target.exists() and not force: raise typer.BadParameter('output exists; use --force')
  if bundle:
   target.parent.mkdir(parents=True,exist_ok=True); tmp=target.with_suffix('.tmp.zip')
@@ -34,8 +34,9 @@ def export(identifier:str='latest',format:str='html',out:Path|None=None,bundle:b
  typer.echo(str(target))
 
 @app.command("import")
-def import_transcript(provider: str = typer.Option(...), file: Path = typer.Option(...), transcript: Path | None = typer.Option(None)):
+def import_transcript(provider: str = typer.Option(...), file: Path | None = typer.Option(None), transcript: Path | None = typer.Option(None)):
     source = transcript or file
+    if source is None: raise typer.BadParameter('provide --file or --transcript')
     if not source.exists(): raise typer.BadParameter("input file not found")
     data = source.read_bytes(); digest = hashlib.sha256(data).hexdigest()
     paths = __import__("aicr.storage", fromlist=["make_session"]).make_session(home())
