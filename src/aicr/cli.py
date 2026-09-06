@@ -187,3 +187,17 @@ def providers():
         typer.echo(
             f"{name}: pty={cls.capabilities.pty} native={cls.capabilities.native} import={cls.capabilities.import_mode}"
         )
+
+
+@app.command()
+def search(query: str, limit: int = 20):
+    from .database import search as db_search
+
+    for sid, eid, snippet in db_search(home(), query, limit):
+        typer.echo(f"{sid} {eid}: {snippet}")
+
+
+@app.command()
+def control():
+    typer.echo("external control is not enabled in this build")
+    raise typer.Exit(code=2)

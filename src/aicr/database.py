@@ -55,3 +55,22 @@ def rebuild(home: Path):
     c.commit()
     c.close()
     return count
+
+
+def search(home: Path, query: str, limit: int = 20):
+    c = connect(home / "database" / "aicr.sqlite3")
+    try:
+        c.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS event_fts USING fts5(event_id UNINDEXED, session_id UNINDEXED, content)"
+        )
+        c.execute("DELETE FROM event_fts")
+        c.execute(
+            "INSERT INTO event_fts SELECT id, session_id, type || ' ' || payload_json FROM events"
+        )
+        rows = c.execute(
+            "SELECT session_id, event_id, snippet(event_fts, 2, '[', ']', '...', 12) FROM event_fts WHERE event_fts MATCH ? LIMIT ?",
+            (query, limit),
+        ).fetchall()
+        return rows
+    finally:
+        c.close()
