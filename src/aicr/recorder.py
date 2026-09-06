@@ -24,7 +24,6 @@ def record(command: list[str], home: Path) -> int:
     atomic_json(paths.metadata, meta)
     master, pid = pty.fork()
     if pid == 0:
-        os.setsid()
         os.execvp(command[0], command)
     writer.write("session_start", {"argv": command, "cwd": os.getcwd()})
     old = {
