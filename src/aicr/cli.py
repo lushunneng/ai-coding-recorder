@@ -177,3 +177,13 @@ def delete(identifier: str, include_assets: bool = False, yes: bool = False):
 @app.command()
 def prune(dry_run: bool = True, yes: bool = False):
     typer.echo("no automatic retention policy configured; nothing removed")
+
+
+@app.command()
+def providers():
+    from .adapters import ADAPTERS
+
+    for name, cls in ADAPTERS.items():
+        typer.echo(
+            f"{name}: pty={cls.capabilities.pty} native={cls.capabilities.native} import={cls.capabilities.import_mode}"
+        )
