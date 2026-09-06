@@ -148,10 +148,6 @@ def init(force: bool = False):
     typer.echo(str(home()))
 
 
-if __name__ == "__main__":
-    app()
-
-
 @app.command()
 def rebuild_index():
     from .database import rebuild
@@ -201,3 +197,7 @@ def search(query: str, limit: int = 20):
 def control():
     typer.echo("external control is not enabled in this build")
     raise typer.Exit(code=2)
+
+
+if __name__ == "__main__":
+    app()

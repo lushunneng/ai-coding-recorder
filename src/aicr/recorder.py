@@ -76,8 +76,11 @@ def record(command: list[str], home: Path) -> int:
                 else:
                     break
             lock.heartbeat()
-        _, status = os.waitpid(pid, 0)
-        code = os.waitstatus_to_exitcode(status)
+        try:
+            _, status = os.waitpid(pid, 0)
+            code = os.waitstatus_to_exitcode(status)
+        except ChildProcessError:
+            code = 0
         writer.write("process_exit", {"returncode": code})
         writer.write("session_end", {"status": "completed" if code == 0 else "failed"})
         meta.update(
