@@ -150,3 +150,10 @@ def init(force: bool = False):
 
 if __name__ == "__main__":
     app()
+
+
+@app.command()
+def rebuild_index():
+    from .database import rebuild
+
+    typer.echo(f"indexed events: {rebuild(home())}")
