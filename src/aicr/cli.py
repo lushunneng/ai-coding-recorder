@@ -3,35 +3,101 @@ import json
 import os
 import time
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
 
-from .exporter import atomic_write, find_session, render
+from .adapters import get_adapter
+from .exporter import atomic_write, events, find_session, payload, render
 from .recorder import record
-from .storage import recover_file
+from .storage import RawWriter, atomic_json, make_session, recover_file
 
 app = typer.Typer()
+VERSION = "0.1.0"
 
 
-def home():
+def version_callback(value: bool):
+    if value:
+        typer.echo(f"aicr {VERSION}")
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        False, "--version", callback=version_callback, is_eager=True
+    ),
+):
+    """AI Coding Recorder command line interface."""
+
+
+def home(create: bool = True):
     p = Path(os.environ.get("AICR_HOME", str(Path.home() / ".aicr")))
-    p.mkdir(parents=True, exist_ok=True)
+    if create:
+        p.mkdir(parents=True, exist_ok=True)
     return p
 
 
-@app.command()
+def export_timestamp(meta: Path) -> str:
+    try:
+        started = json.loads(meta.read_text(encoding="utf-8")).get("started_at")
+        return datetime.fromtimestamp(float(started), UTC).strftime("%Y%m%dT%H%M%S")
+    except (OSError, ValueError, TypeError, OverflowError):
+        return datetime.fromtimestamp(meta.stat().st_mtime, UTC).strftime("%Y%m%dT%H%M%S")
+
+
+@app.command("record")
 def record_cmd(command: list[str] = typer.Argument(..., metavar="COMMAND")):  # noqa: B008
-    raise typer.Exit(record(command, home()))
-
-
-app.command("record")(record_cmd)
+    return record(command, home())
 
 
 @app.command()
 def recover(scan: bool = False):
     for raw in home().glob("sessions/**/raw.jsonl"):
         recover_file(raw, raw.with_name("metadata.json"), scan)
+
+
+@app.command("sessions")
+def sessions(
+    status: str | None = typer.Option(None),
+    limit: int = typer.Option(20, min=1, max=1000),
+    cursor: str | None = typer.Option(None),
+):
+    """List recorded sessions in deterministic newest-first order."""
+    rows = []
+    for meta in home().glob("sessions/**/metadata.json"):
+        try:
+            data = json.loads(meta.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if status and data.get("status") != status:
+            continue
+        sid = str(data.get("id", meta.parent.name))
+        rows.append((str(data.get("started_at", "")), sid, data))
+    rows.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    if cursor:
+        rows = [row for row in rows if row[1] < cursor]
+    for _, sid, data in rows[:limit]:
+        typer.echo(
+            f"{sid}\t{data.get('status', 'unknown')}\t{data.get('provider', 'generic')}"
+        )
+
+
+@app.command()
+def doctor():
+    """Check local runtime and storage prerequisites without modifying files."""
+    root = home(create=False)
+    checks = {
+        "python": True,
+        "pty": hasattr(os, "openpty"),
+        "home_exists": root.is_dir(),
+        "home_writable": root.is_dir() and os.access(root, os.W_OK),
+    }
+    for name, ok in checks.items():
+        typer.echo(f"{name}: {'ok' if ok else 'error'}")
+    if not all(checks.values()):
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -42,7 +108,14 @@ def show(identifier: str = typer.Argument("latest"), format: str = "summary"):
     if format == "summary":
         typer.echo(m.read_text())
         return
-    typer.echo(render(m, "json" if format == "json" else "markdown"))
+    if format == "transcript":
+        for event in events(m):
+            if event.get("type") in {"terminal_output", "terminal_input"}:
+                typer.echo(payload(event))
+        return
+    if format != "json":
+        raise typer.BadParameter("format must be summary, transcript, or json")
+    typer.echo(render(m, "json"))
 
 
 @app.command()
@@ -60,7 +133,9 @@ def export(
     ext = "zip" if bundle else format
     target = (
         out
-        or home() / "exports" / f"{m.parent.name[:8]}_{int(m.stat().st_mtime)}.{ext}"
+        or home()
+        / "exports"
+        / f"{m.parent.name[:8]}_{export_timestamp(m)}.{ext}"
     )
     if target.exists() and not force:
         raise typer.BadParameter("output exists; use --force")
@@ -90,9 +165,14 @@ def import_transcript(
         raise typer.BadParameter("provide --file or --transcript")
     if not source.exists():
         raise typer.BadParameter("input file not found")
-    data = source.read_bytes()
-    digest = hashlib.sha256(data).hexdigest()
-    paths = __import__("aicr.storage", fromlist=["make_session"]).make_session(home())
+    adapter_cls = get_adapter(provider)
+    if not adapter_cls.capabilities.import_mode:
+        raise typer.BadParameter(
+            f"provider '{provider}' does not support transcript import"
+        )
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    text = source.read_text(encoding="utf-8", errors="replace")
+    paths = make_session(home())
     meta = {
         "id": paths.root.name,
         "status": "completed",
@@ -102,43 +182,15 @@ def import_transcript(
         "source_sha256": digest,
         "started_at": time.time(),
         "ended_at": time.time(),
+        "event_count": 2,
     }
-    paths.raw.write_text(
-        json.dumps(
-            {
-                "id": "evt_000000000001",
-                "session_id": paths.root.name,
-                "sequence": 1,
-                "timestamp": time.time(),
-                "monotonic_ns": time.monotonic_ns(),
-                "type": "terminal_output",
-                "payload": {
-                    "encoding": "utf-8",
-                    "text": data.decode("utf-8", errors="replace"),
-                },
-            },
-            ensure_ascii=False,
-        )
-        + "\n"
+    writer = RawWriter(paths.raw)
+    writer.write(
+        "terminal_output", {"encoding": "utf-8", "text": text}, actor="user"
     )
-    paths.raw.write_text(
-        paths.raw.read_text()
-        + json.dumps(
-            {
-                "id": "evt_000000000002",
-                "session_id": paths.root.name,
-                "sequence": 2,
-                "timestamp": time.time(),
-                "monotonic_ns": time.monotonic_ns(),
-                "type": "session_end",
-                "payload": {"status": "completed"},
-            }
-        )
-        + "\n"
-    )
-    __import__("aicr.storage", fromlist=["atomic_json"]).atomic_json(
-        paths.metadata, meta
-    )
+    writer.write("session_end", {"status": "completed"})
+    writer.close()
+    atomic_json(paths.metadata, meta)
     typer.echo(paths.root.name)
 
 

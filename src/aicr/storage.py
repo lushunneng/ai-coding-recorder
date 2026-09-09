@@ -1,8 +1,10 @@
 import json
 import os
+import socket
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -27,9 +29,7 @@ class RawWriter:
             "id": f"evt_{self.sequence:012d}",
             "session_id": self.path.parent.name,
             "sequence": self.sequence,
-            "timestamp": __import__("datetime")
-            .datetime.now(__import__("datetime").timezone.utc)
-            .isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "monotonic_ns": time.monotonic_ns(),
             "type": typ,
             "payload": payload,
@@ -61,7 +61,7 @@ class SessionLock:
             "session_id": self.session_id,
             "created_at": time.time(),
             "heartbeat_at": time.time(),
-            "host_id": __import__("socket").gethostname(),
+            "host_id": socket.gethostname(),
             "takeover_id": None,
         }
         try:
@@ -92,7 +92,7 @@ class SessionLock:
 
 
 def make_session(home: Path) -> SessionPaths:
-    now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+    now = datetime.now(UTC)
     sid = "sess_" + now.strftime("%Y%m%dT%H%M%S") + f"_{os.getpid()}"
     root = home / "sessions" / now.strftime("%Y/%m/%d") / sid
     root.mkdir(parents=True, mode=0o700)
@@ -112,14 +112,15 @@ def atomic_json(path: Path, data: dict):
 def recover_file(raw: Path, metadata: Path, scan=False):
     valid = []
     skipped = []
-    for line in raw.open("rb"):
-        try:
-            valid.append(json.loads(line))
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            if scan:
-                skipped.append(len(valid) + 1)
-            else:
-                break
+    if raw.exists():
+        for line in raw.open("rb"):
+            try:
+                valid.append(json.loads(line))
+            except (OSError, ValueError, TypeError):
+                if scan:
+                    skipped.append(len(valid) + 1)
+                else:
+                    break
     state = {
         "recovery": {
             "last_valid_sequence": valid[-1]["sequence"] if valid else 0,
@@ -127,5 +128,14 @@ def recover_file(raw: Path, metadata: Path, scan=False):
             "interrupted": True,
         }
     }
-    atomic_json(metadata, state)
+    # Merge recovery state into existing metadata instead of clobbering it.
+    if metadata.exists():
+        try:
+            merged = json.loads(metadata.read_text())
+        except (OSError, ValueError, TypeError):
+            merged = {}
+    else:
+        merged = {}
+    merged["recovery"] = state["recovery"]
+    atomic_json(metadata, merged)
     return state

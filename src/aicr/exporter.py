@@ -14,7 +14,7 @@ def find_session(home: Path, ident: str):
         try:
             if json.loads(p.read_text()).get("id") == ident or p.parent.name == ident:
                 return p
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        except (OSError, ValueError, TypeError):
             pass
     return None
 
@@ -42,7 +42,7 @@ def events(meta: Path):
     for line in raw.open("rb"):
         try:
             yield json.loads(line)
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        except (OSError, ValueError, TypeError):
             continue
 
 

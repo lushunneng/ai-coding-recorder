@@ -1,3 +1,4 @@
+import base64
 import os
 import pty
 import select
@@ -55,7 +56,7 @@ def record(command: list[str], home: Path) -> int:
                     "terminal_input",
                     {
                         "encoding": "base64",
-                        "data": __import__("base64").b64encode(b).decode(),
+                        "data": base64.b64encode(b).decode(),
                     },
                 )
             if master in r:
@@ -69,7 +70,7 @@ def record(command: list[str], home: Path) -> int:
                         "terminal_output",
                         {
                             "encoding": "base64",
-                            "data": __import__("base64").b64encode(b).decode(),
+                            "data": base64.b64encode(b).decode(),
                         },
                     )
                 else:
