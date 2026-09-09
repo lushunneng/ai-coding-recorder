@@ -1,12 +1,29 @@
 import base64
+import fcntl
 import os
 import pty
 import select
 import signal
+import termios
 import time
 from pathlib import Path
 
 from .storage import RawWriter, SessionLock, atomic_json, make_session
+
+
+def _copy_winsize(source_fd: int, target_fd: int) -> None:
+    if not os.isatty(source_fd):
+        return
+    try:
+        size = fcntl.ioctl(source_fd, termios.TIOCGWINSZ, b"\0" * 8)
+        fcntl.ioctl(target_fd, termios.TIOCSWINSZ, size)
+    except OSError:
+        pass
+
+
+def _wait_for_child(pid: int) -> int:
+    _, status = os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status)
 
 
 def record(command: list[str], home: Path) -> int:
@@ -25,13 +42,22 @@ def record(command: list[str], home: Path) -> int:
     atomic_json(paths.metadata, meta)
     master, pid = pty.fork()
     if pid == 0:
+        try:
+            os.setsid()
+        except OSError:
+            pass
         os.execvp(command[0], command)
+    _copy_winsize(0, master)
     writer.write("session_start", {"argv": command, "cwd": os.getcwd()})
     old = {
-        s: signal.getsignal(s) for s in (signal.SIGWINCH, signal.SIGTERM, signal.SIGHUP)
+        s: signal.getsignal(s)
+        for s in (signal.SIGWINCH, signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
     }
 
     def forward(sig, _):
+        if sig == signal.SIGWINCH:
+            _copy_winsize(0, master)
+            return
         try:
             os.killpg(pid, sig)
         except ProcessLookupError:
@@ -77,10 +103,9 @@ def record(command: list[str], home: Path) -> int:
                     break
             lock.heartbeat()
         try:
-            _, status = os.waitpid(pid, 0)
-            code = os.waitstatus_to_exitcode(status)
+            code = _wait_for_child(pid)
         except ChildProcessError:
-            code = 0
+            code = 1
         writer.write("process_exit", {"returncode": code})
         writer.write("session_end", {"status": "completed" if code == 0 else "failed"})
         meta.update(
@@ -92,6 +117,10 @@ def record(command: list[str], home: Path) -> int:
         atomic_json(paths.metadata, meta)
         return code
     except BaseException as e:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         writer.write("error", {"error": type(e).__name__, "message": str(e)})
         meta.update(
             status="interrupted", ended_at=time.time(), event_count=writer.sequence
@@ -99,6 +128,8 @@ def record(command: list[str], home: Path) -> int:
         atomic_json(paths.metadata, meta)
         raise
     finally:
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
         writer.close()
         try:
             os.close(master)

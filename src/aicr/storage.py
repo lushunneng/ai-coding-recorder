@@ -3,6 +3,7 @@ import os
 import socket
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,12 +23,14 @@ class RawWriter:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.fp = path.open("ab", buffering=0)
         self.sequence = 0
+        self.session_id = self.path.parent.name
+        self.writer_id = uuid.uuid4().hex
 
     def write(self, typ: str, payload: dict, actor: str = "system") -> int:
         self.sequence += 1
         event = {
-            "id": f"evt_{self.sequence:012d}",
-            "session_id": self.path.parent.name,
+            "id": f"evt_{uuid.uuid4().hex}",
+            "session_id": self.session_id,
             "sequence": self.sequence,
             "timestamp": datetime.now(UTC).isoformat(),
             "monotonic_ns": time.monotonic_ns(),
@@ -53,6 +56,7 @@ class SessionLock:
     def __init__(self, path: Path, session_id: str):
         self.path, self.session_id = path, session_id
         self.held = False
+        self.lock_id: str | None = None
 
     def acquire(self):
         data = {
@@ -62,38 +66,101 @@ class SessionLock:
             "created_at": time.time(),
             "heartbeat_at": time.time(),
             "host_id": socket.gethostname(),
-            "takeover_id": None,
+            "takeover_id": uuid.uuid4().hex,
         }
         try:
             fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.write(fd, json.dumps(data).encode())
-            os.close(fd)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(data, stream, separators=(",", ":"))
+                stream.flush()
+                os.fsync(stream.fileno())
             self.held = True
+            self.lock_id = data["takeover_id"]
         except FileExistsError:
-            raise RuntimeError("session lock is held")
+            raise RuntimeError("session lock is held") from None
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    def is_stale(self, timeout: float = 30.0) -> bool:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            heartbeat = float(data.get("heartbeat_at", 0))
+            pid = int(data.get("pid", 0))
+        except (OSError, ValueError, TypeError):
+            return True
+        return (not self._pid_alive(pid)) and time.time() - heartbeat > timeout
 
     def heartbeat(self):
         if self.held:
             try:
-                data = json.loads(self.path.read_text())
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+                if data.get("takeover_id") != self.lock_id:
+                    self.held = False
+                    return
                 data["heartbeat_at"] = time.time()
-                self.path.write_text(json.dumps(data))
-                os.chmod(self.path, 0o600)
-            except OSError:
+                atomic_json(self.path, data)
+            except (OSError, ValueError, TypeError):
+                pass
+
+    def takeover(self, timeout: float = 30.0) -> bool:
+        """Atomically attempt to replace a stale lock and verify ownership."""
+        if self.path.exists() and not self.is_stale(timeout):
+            return False
+        takeover_id = uuid.uuid4().hex
+        data = {
+            "pid": os.getpid(),
+            "process_start_time": time.time(),
+            "session_id": self.session_id,
+            "created_at": time.time(),
+            "heartbeat_at": time.time(),
+            "host_id": socket.gethostname(),
+            "takeover_id": takeover_id,
+        }
+        tmp = self.path.with_name(f".{self.path.name}.{takeover_id}.tmp")
+        try:
+            with tmp.open("x", encoding="utf-8") as stream:
+                json.dump(data, stream, separators=(",", ":"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, self.path)
+            current = json.loads(self.path.read_text(encoding="utf-8"))
+            if current.get("takeover_id") != takeover_id:
+                return False
+            self.lock_id = takeover_id
+            self.held = True
+            return True
+        except (FileExistsError, OSError, ValueError, TypeError):
+            return False
+        finally:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
                 pass
 
     def release(self):
         if self.held:
             try:
-                self.path.unlink()
-            except FileNotFoundError:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+                if data.get("takeover_id") == self.lock_id:
+                    self.path.unlink()
+            except (FileNotFoundError, OSError, ValueError, TypeError):
                 pass
             self.held = False
 
 
 def make_session(home: Path) -> SessionPaths:
     now = datetime.now(UTC)
-    sid = "sess_" + now.strftime("%Y%m%dT%H%M%S") + f"_{os.getpid()}"
+    sid = "sess_" + now.strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:12]
     root = home / "sessions" / now.strftime("%Y/%m/%d") / sid
     root.mkdir(parents=True, mode=0o700)
     return SessionPaths(root, root / "raw.jsonl", root / "metadata.json", root / "lock")

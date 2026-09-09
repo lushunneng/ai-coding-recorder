@@ -9,6 +9,9 @@ from pathlib import Path
 import typer
 
 from .adapters import get_adapter
+from .config import ensure as ensure_config
+from .config import has_capacity
+from .config import load as load_config
 from .exporter import atomic_write, events, find_session, payload, render
 from .recorder import record
 from .storage import RawWriter, atomic_json, make_session, recover_file
@@ -44,12 +47,22 @@ def export_timestamp(meta: Path) -> str:
         started = json.loads(meta.read_text(encoding="utf-8")).get("started_at")
         return datetime.fromtimestamp(float(started), UTC).strftime("%Y%m%dT%H%M%S")
     except (OSError, ValueError, TypeError, OverflowError):
-        return datetime.fromtimestamp(meta.stat().st_mtime, UTC).strftime("%Y%m%dT%H%M%S")
+        return datetime.fromtimestamp(meta.stat().st_mtime, UTC).strftime(
+            "%Y%m%dT%H%M%S"
+        )
 
 
 @app.command("record")
 def record_cmd(command: list[str] = typer.Argument(..., metavar="COMMAND")):  # noqa: B008
-    return record(command, home())
+    root = home()
+    try:
+        config = load_config(root)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=3) from exc
+    if not has_capacity(root, config):
+        raise typer.Exit(code=11)
+    return record(command, root)
 
 
 @app.command()
@@ -88,11 +101,18 @@ def sessions(
 def doctor():
     """Check local runtime and storage prerequisites without modifying files."""
     root = home(create=False)
+    try:
+        load_config(root, create=False)
+        config_ok = True
+    except ValueError as exc:
+        typer.echo(str(exc))
+        config_ok = False
     checks = {
         "python": True,
         "pty": hasattr(os, "openpty"),
         "home_exists": root.is_dir(),
         "home_writable": root.is_dir() and os.access(root, os.W_OK),
+        "config": config_ok,
     }
     for name, ok in checks.items():
         typer.echo(f"{name}: {'ok' if ok else 'error'}")
@@ -130,24 +150,42 @@ def export(
     m = find_session(home(), identifier)
     if not m:
         raise typer.BadParameter("session not found")
+    if format not in {"html", "markdown", "json"}:
+        raise typer.BadParameter("format must be html, markdown, or json")
+    if bundle and format != "html":
+        raise typer.BadParameter("--bundle cannot be combined with --format")
+    if include_raw and not bundle:
+        raise typer.BadParameter("--include-raw requires --bundle")
+    if include_raw and not force:
+        raise typer.BadParameter("--include-raw requires --force confirmation")
     ext = "zip" if bundle else format
     target = (
-        out
-        or home()
-        / "exports"
-        / f"{m.parent.name[:8]}_{export_timestamp(m)}.{ext}"
+        out or home() / "exports" / f"{m.parent.name[:8]}_{export_timestamp(m)}.{ext}"
     )
     if target.exists() and not force:
         raise typer.BadParameter("output exists; use --force")
     if bundle:
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(".tmp.zip")
+        html_data = render(m, "html")
+        markdown_data = render(m, "markdown")
+        manifest = {
+            "session_id": m.parent.name,
+            "generator_version": VERSION,
+            "redacted": not include_raw,
+            "files": {
+                "session.html": hashlib.sha256(html_data.encode()).hexdigest(),
+                "session.md": hashlib.sha256(markdown_data.encode()).hexdigest(),
+            },
+        }
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
-            z.writestr("session.html", render(m, "html"))
-            z.writestr("session.md", render(m, "markdown"))
-            z.writestr("manifest.json", '{"redacted":true}')
+            z.writestr("session.html", html_data)
+            z.writestr("session.md", markdown_data)
             if include_raw:
-                z.write(m.with_name("raw.jsonl"), "raw.jsonl")
+                raw_data = m.with_name("raw.jsonl").read_bytes()
+                z.writestr("raw.jsonl", raw_data)
+                manifest["files"]["raw.jsonl"] = hashlib.sha256(raw_data).hexdigest()
+            z.writestr("manifest.json", json.dumps(manifest, indent=2))
         os.replace(tmp, target)
     else:
         atomic_write(target, render(m, format))
@@ -165,12 +203,23 @@ def import_transcript(
         raise typer.BadParameter("provide --file or --transcript")
     if not source.exists():
         raise typer.BadParameter("input file not found")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    for existing in home().glob("sessions/**/metadata.json"):
+        try:
+            if (
+                json.loads(existing.read_text(encoding="utf-8")).get("source_sha256")
+                == digest
+            ):
+                raise typer.BadParameter(
+                    f"transcript already imported as {existing.parent.name}"
+                )
+        except (OSError, ValueError, TypeError):
+            continue
     adapter_cls = get_adapter(provider)
     if not adapter_cls.capabilities.import_mode:
         raise typer.BadParameter(
             f"provider '{provider}' does not support transcript import"
         )
-    digest = hashlib.sha256(source.read_bytes()).hexdigest()
     text = source.read_text(encoding="utf-8", errors="replace")
     paths = make_session(home())
     meta = {
@@ -185,9 +234,7 @@ def import_transcript(
         "event_count": 2,
     }
     writer = RawWriter(paths.raw)
-    writer.write(
-        "terminal_output", {"encoding": "utf-8", "text": text}, actor="user"
-    )
+    writer.write("terminal_output", {"encoding": "utf-8", "text": text}, actor="user")
     writer.write("session_end", {"status": "completed"})
     writer.close()
     atomic_json(paths.metadata, meta)
@@ -196,8 +243,9 @@ def import_transcript(
 
 @app.command()
 def init(force: bool = False):
-    home()
-    typer.echo(str(home()))
+    root = home()
+    ensure_config(root, force=force)
+    typer.echo(str(root))
 
 
 @app.command()
@@ -219,12 +267,40 @@ def delete(identifier: str, include_assets: bool = False, yes: bool = False):
     if not m:
         raise typer.BadParameter("session not found")
     shutil.rmtree(m.parent)
+    from .database import rebuild
+
+    rebuild(home())
     typer.echo(f"deleted {m.parent.name}")
 
 
 @app.command()
 def prune(dry_run: bool = True, yes: bool = False):
-    typer.echo("no automatic retention policy configured; nothing removed")
+    try:
+        config = load_config(home())
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=3) from exc
+    metas = []
+    for meta in home().glob("sessions/**/metadata.json"):
+        try:
+            data = json.loads(meta.read_text(encoding="utf-8"))
+            metas.append((float(data.get("ended_at", data.get("started_at", 0))), meta))
+        except (OSError, ValueError, TypeError):
+            continue
+    candidates: list[Path] = []
+    if config.max_sessions is not None and len(metas) > config.max_sessions:
+        metas.sort(key=lambda item: item[0])
+        candidates.extend(meta for _, meta in metas[: len(metas) - config.max_sessions])
+    for meta in candidates:
+        typer.echo(str(meta.parent.name))
+    if candidates and not dry_run and yes:
+        import shutil
+
+        for meta in candidates:
+            shutil.rmtree(meta.parent)
+        from .database import rebuild
+
+        rebuild(home())
 
 
 @app.command()

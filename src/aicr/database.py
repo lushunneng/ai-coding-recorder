@@ -37,6 +37,7 @@ def rebuild(home: Path):
             )
         except (OSError, ValueError, TypeError):
             continue
+        c.execute("DELETE FROM events WHERE session_id = ?", (sid,))
         for line in meta.with_name("raw.jsonl").open("rb"):
             try:
                 e = json.loads(line)
@@ -54,7 +55,22 @@ def rebuild(home: Path):
                 count += 1
             except (ValueError, TypeError, KeyError):
                 continue
-    # Rebuild the FTS index in the same pass so search never does a full scan.
+    # Remove derived rows for sessions no longer present on disk.
+    disk_ids = set()
+    for meta in home.glob("sessions/**/metadata.json"):
+        if not meta.is_file():
+            continue
+        try:
+            disk_ids.add(json.loads(meta.read_text()).get("id", meta.parent.name))
+        except (OSError, ValueError, TypeError):
+            continue
+    if disk_ids:
+        placeholders = ",".join("?" for _ in disk_ids)
+        c.execute(
+            f"DELETE FROM sessions WHERE id NOT IN ({placeholders})", tuple(disk_ids)
+        )
+    else:
+        c.execute("DELETE FROM sessions")
     populate_fts(c)
     c.commit()
     c.close()
@@ -95,6 +111,7 @@ def search(home: Path, query: str, limit: int = 20):
         event_rows = c.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         if fts_rows != event_rows:
             populate_fts(c)
+            c.commit()
         rows = c.execute(
             "SELECT session_id, event_id, snippet(event_fts, 2, '[', ']', '...', 12) "
             "FROM event_fts WHERE event_fts MATCH ? LIMIT ?",

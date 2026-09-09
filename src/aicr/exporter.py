@@ -46,12 +46,21 @@ def events(meta: Path):
             continue
 
 
+REDACTION_RULES_VERSION = "2026-09-09.1"
+
+
 def redact(s: str):
     pats = [
-        (r"(sk-[A-Za-z0-9_-]{10,})", "OPENAI_KEY"),
-        (r"(ghp_[A-Za-z0-9]{20,})", "GITHUB_TOKEN"),
-        (r"(Bearer\s+)[A-Za-z0-9._~-]+", r"\1REDACTED"),
-        (r"eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+", "JWT"),
+        (r"(sk-[A-Za-z0-9_-]{10,})", "[REDACTED:OPENAI_KEY]"),
+        (r"(gh[pousr]_[A-Za-z0-9]{20,})", "[REDACTED:GITHUB_TOKEN]"),
+        (r"(AKIA[0-9A-Z]{16})", "[REDACTED:AWS_ACCESS_KEY]"),
+        (r"(?i)(aws_secret_access_key\s*[=:]\s*)[^\s]+", r"\1[REDACTED:AWS_SECRET]"),
+        (
+            r"(?i)(password|passwd|token|secret)\s*[=:]\s*[^\s]+",
+            r"\1=[REDACTED:SECRET]",
+        ),
+        (r"(Bearer\s+)[A-Za-z0-9._~-]+", r"\1[REDACTED:BEARER]"),
+        (r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", "[REDACTED:JWT]"),
     ]
     for p, repl in pats:
         s = re.sub(p, repl, s, flags=re.IGNORECASE)
@@ -77,8 +86,31 @@ def render(meta: Path, fmt: str, redact_on=True):
         text = redact(text) if redact_on else text
         rows.append((e["sequence"], e["type"], text))
     if fmt == "json":
+        session = json.loads(meta.read_text(encoding="utf-8"))
+        safe_events = []
+        for event in es:
+            safe_event = dict(event)
+            safe_payload = dict(event.get("payload", {}))
+            if "text" in safe_payload:
+                safe_payload["text"] = (
+                    redact(str(safe_payload["text"]))
+                    if redact_on
+                    else safe_payload["text"]
+                )
+            if "data" in safe_payload and isinstance(safe_payload["data"], str):
+                safe_payload["data"] = (
+                    redact(safe_payload["data"]) if redact_on else safe_payload["data"]
+                )
+            safe_event["payload"] = safe_payload
+            safe_events.append(safe_event)
         return json.dumps(
-            {"session": json.loads(meta.read_text()), "events": es},
+            {
+                "session": session,
+                "events": safe_events,
+                "redaction_rules_version": REDACTION_RULES_VERSION
+                if redact_on
+                else None,
+            },
             ensure_ascii=False,
             indent=2,
         )

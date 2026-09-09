@@ -1,8 +1,9 @@
 import subprocess
+from typing import Any
 
 
 def snapshot(cwd: str, timeout: float = 3.0, max_bytes: int = 1_000_000):
-    result = {"is_git": False, "warnings": []}
+    result: dict[str, Any] = {"is_git": False, "warnings": []}
     try:
         subprocess.run(
             ["git", "-C", cwd, "rev-parse", "--git-dir"],
