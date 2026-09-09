@@ -62,7 +62,7 @@ def record_cmd(command: list[str] = typer.Argument(..., metavar="COMMAND")):  # 
         raise typer.Exit(code=3) from exc
     if not has_capacity(root, config):
         raise typer.Exit(code=11)
-    return record(command, root)
+    raise typer.Exit(code=record(command, root))
 
 
 @app.command()

@@ -225,3 +225,11 @@ def test_default_config_is_valid_toml(tmp_path):
     assert config.retention_days is None
     assert config.max_sessions is None
     assert config.max_total_bytes > 0
+
+
+def test_record_propagates_wrapped_exit_code(monkeypatch, tmp_path):
+    from aicr import cli
+
+    monkeypatch.setattr(cli, "record", lambda command, root: 7)
+    result = CLI.invoke(app, ["record", "bash"], env={"AICR_HOME": str(tmp_path)})
+    assert result.exit_code == 7
