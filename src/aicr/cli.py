@@ -52,8 +52,7 @@ def export_timestamp(meta: Path) -> str:
         )
 
 
-@app.command("record")
-def record_cmd(command: list[str] = typer.Argument(..., metavar="COMMAND")):  # noqa: B008
+def start_recording(command: list[str]) -> None:
     root = home()
     try:
         config = load_config(root)
@@ -63,6 +62,18 @@ def record_cmd(command: list[str] = typer.Argument(..., metavar="COMMAND")):  # 
     if not has_capacity(root, config):
         raise typer.Exit(code=11)
     raise typer.Exit(code=record(command, root))
+
+
+@app.command("record")
+def record_cmd(command: list[str] = typer.Argument(..., metavar="COMMAND")):  # noqa: B008
+    """Record an arbitrary interactive command."""
+    start_recording(command)
+
+
+@app.command()
+def claude():
+    """Record an interactive Claude Code session."""
+    start_recording(["claude"])
 
 
 @app.command()

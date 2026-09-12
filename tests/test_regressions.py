@@ -233,3 +233,13 @@ def test_record_propagates_wrapped_exit_code(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "record", lambda command, root: 7)
     result = CLI.invoke(app, ["record", "bash"], env={"AICR_HOME": str(tmp_path)})
     assert result.exit_code == 7
+
+
+def test_claude_shortcut_records_claude(monkeypatch, tmp_path):
+    from aicr import cli
+
+    called = []
+    monkeypatch.setattr(cli, "record", lambda command, root: called.append(command) or 0)
+    result = CLI.invoke(app, ["claude"], env={"AICR_HOME": str(tmp_path)})
+    assert result.exit_code == 0, result.output
+    assert called == [["claude"]]
