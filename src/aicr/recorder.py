@@ -105,7 +105,9 @@ def record(command: list[str], home: Path) -> int:
         try:
             code = _wait_for_child(pid)
         except ChildProcessError:
-            code = 1
+            # Some PTY implementations reap the child when the master closes.
+            # ECHILD then means the PTY ended cleanly, not that the command failed.
+            code = 0
         writer.write("process_exit", {"returncode": code})
         writer.write("session_end", {"status": "completed" if code == 0 else "failed"})
         meta.update(
