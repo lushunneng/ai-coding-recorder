@@ -40,7 +40,7 @@ def record(command: list[str], home: Path) -> int:
         "capture_mode": "pty",
     }
     atomic_json(paths.metadata, meta)
-    master, pid = pty.fork()
+    pid, master = pty.fork()
     if pid == 0:
         try:
             os.setsid()

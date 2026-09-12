@@ -243,3 +243,17 @@ def test_claude_shortcut_records_claude(monkeypatch, tmp_path):
     result = CLI.invoke(app, ["claude"], env={"AICR_HOME": str(tmp_path)})
     assert result.exit_code == 0, result.output
     assert called == [["claude"]]
+
+
+def test_record_shortcut_runs_wrapped_command(tmp_path):
+    import subprocess
+
+    env = {**__import__("os").environ, "AICR_HOME": str(tmp_path)}
+    subprocess.run([__import__("sys").executable, "-m", "aicr.cli", "init"], env=env, check=True)
+    result = subprocess.run(
+        [__import__("sys").executable, "-m", "aicr.cli", "record", "--", "sh", "-c", "printf ok"],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0
+    raw = next(tmp_path.glob("sessions/**/raw.jsonl"))
+    assert "ok" in raw.read_text()
