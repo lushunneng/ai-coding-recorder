@@ -6,6 +6,7 @@ import select
 import signal
 import termios
 import time
+import tty
 from pathlib import Path
 
 from .storage import RawWriter, SessionLock, atomic_json, make_session
@@ -24,6 +25,20 @@ def _copy_winsize(source_fd: int, target_fd: int) -> None:
 def _wait_for_child(pid: int) -> int:
     _, status = os.waitpid(pid, 0)
     return os.waitstatus_to_exitcode(status)
+
+
+def _enable_raw_mode(fd: int) -> list | None:
+    """Disable the outer terminal's echo and line buffering while relaying a PTY."""
+    if not os.isatty(fd):
+        return None
+    original = termios.tcgetattr(fd)
+    tty.setraw(fd)
+    return original
+
+
+def _restore_terminal_mode(fd: int, original: list | None) -> None:
+    if original is not None:
+        termios.tcsetattr(fd, termios.TCSADRAIN, original)
 
 
 def record(command: list[str], home: Path) -> int:
@@ -65,6 +80,7 @@ def record(command: list[str], home: Path) -> int:
 
     for s in old:
         signal.signal(s, forward)
+    original_terminal_mode = _enable_raw_mode(0)
     poller = select.poll()
     poller.register(master, select.POLLIN)
     if os.isatty(0):
@@ -130,6 +146,7 @@ def record(command: list[str], home: Path) -> int:
         atomic_json(paths.metadata, meta)
         raise
     finally:
+        _restore_terminal_mode(0, original_terminal_mode)
         for sig, handler in old.items():
             signal.signal(sig, handler)
         writer.close()

@@ -239,7 +239,9 @@ def test_claude_shortcut_records_claude(monkeypatch, tmp_path):
     from aicr import cli
 
     called = []
-    monkeypatch.setattr(cli, "record", lambda command, root: called.append(command) or 0)
+    monkeypatch.setattr(
+        cli, "record", lambda command, root: called.append(command) or 0
+    )
     result = CLI.invoke(app, ["claude"], env={"AICR_HOME": str(tmp_path)})
     assert result.exit_code == 0, result.output
     assert called == [["claude"]]
@@ -249,11 +251,51 @@ def test_record_shortcut_runs_wrapped_command(tmp_path):
     import subprocess
 
     env = {**__import__("os").environ, "AICR_HOME": str(tmp_path)}
-    subprocess.run([__import__("sys").executable, "-m", "aicr.cli", "init"], env=env, check=True)
+    subprocess.run(
+        [__import__("sys").executable, "-m", "aicr.cli", "init"], env=env, check=True
+    )
     result = subprocess.run(
-        [__import__("sys").executable, "-m", "aicr.cli", "record", "--", "sh", "-c", "printf ok"],
-        env=env, capture_output=True, text=True, check=False,
+        [
+            __import__("sys").executable,
+            "-m",
+            "aicr.cli",
+            "record",
+            "--",
+            "sh",
+            "-c",
+            "printf ok",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert result.returncode == 0
     raw = next(tmp_path.glob("sessions/**/raw.jsonl"))
     assert "ok" in raw.read_text()
+
+
+def test_raw_terminal_mode_is_restored(monkeypatch):
+    from aicr import recorder
+
+    calls = []
+    monkeypatch.setattr(recorder.os, "isatty", lambda fd: True)
+    monkeypatch.setattr(recorder.termios, "tcgetattr", lambda fd: ["saved"])
+    monkeypatch.setattr(recorder.tty, "setraw", lambda fd: calls.append(("raw", fd)))
+    monkeypatch.setattr(
+        recorder.termios,
+        "tcsetattr",
+        lambda fd, when, state: calls.append(("restore", fd, when, state)),
+    )
+
+    original = recorder._enable_raw_mode(0)
+    recorder._restore_terminal_mode(0, original)
+
+    assert calls == [("raw", 0), ("restore", 0, recorder.termios.TCSADRAIN, ["saved"])]
+
+
+def test_non_tty_does_not_change_terminal_mode(monkeypatch):
+    from aicr import recorder
+
+    monkeypatch.setattr(recorder.os, "isatty", lambda fd: False)
+    assert recorder._enable_raw_mode(0) is None
