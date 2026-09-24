@@ -1,3 +1,4 @@
+import base64
 import html
 import json
 import os
@@ -67,9 +68,31 @@ def redact(s: str):
     return s
 
 
-def payload(e):
+ANSI_ESCAPE = re.compile(
+    r"(?:\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]))"
+)
+
+
+def _terminal_text(value: str, encoding: str | None) -> str:
+    if encoding != "base64":
+        return value
+    try:
+        return base64.b64decode(value, validate=True).decode("utf-8", errors="replace")
+    except (ValueError, UnicodeDecodeError):
+        return value
+
+
+def payload(e, *, clean_terminal: bool = True):
     p = e.get("payload", {})
-    return p.get("text") or p.get("data") or json.dumps(p, ensure_ascii=False)
+    if "text" in p:
+        value = str(p["text"])
+    elif "data" in p:
+        value = _terminal_text(str(p["data"]), p.get("encoding"))
+    else:
+        value = json.dumps(p, ensure_ascii=False)
+    if clean_terminal and e.get("type") in {"terminal_output", "terminal_input"}:
+        value = ANSI_ESCAPE.sub("", value)
+    return value
 
 
 def render(meta: Path, fmt: str, redact_on=True):
@@ -84,7 +107,8 @@ def render(meta: Path, fmt: str, redact_on=True):
     for e in es:
         text = payload(e)
         text = redact(text) if redact_on else text
-        rows.append((e["sequence"], e["type"], text))
+        if text:
+            rows.append((e["sequence"], e["type"], text))
     if fmt == "json":
         session = json.loads(meta.read_text(encoding="utf-8"))
         safe_events = []
@@ -98,9 +122,10 @@ def render(meta: Path, fmt: str, redact_on=True):
                     else safe_payload["text"]
                 )
             if "data" in safe_payload and isinstance(safe_payload["data"], str):
-                safe_payload["data"] = (
-                    redact(safe_payload["data"]) if redact_on else safe_payload["data"]
+                decoded = _terminal_text(
+                    safe_payload["data"], safe_payload.get("encoding")
                 )
+                safe_payload["data"] = redact(decoded) if redact_on else decoded
             safe_event["payload"] = safe_payload
             safe_events.append(safe_event)
         return json.dumps(
