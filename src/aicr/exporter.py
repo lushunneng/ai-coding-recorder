@@ -107,7 +107,7 @@ def render(meta: Path, fmt: str, redact_on=True):
     for e in es:
         text = payload(e)
         text = redact(text) if redact_on else text
-        if text:
+        if text.strip():
             rows.append((e["sequence"], e["type"], text))
     if fmt == "json":
         session = json.loads(meta.read_text(encoding="utf-8"))
